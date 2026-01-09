@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .agent import DocumentAgent, ProcessingResult, BatchResult
-from .analyzers import PDFAnalyzer, EPUBAnalyzer
+from .analyzers import PDFAnalyzer, EPUBAnalyzer, PDFSplitter
 from .scoring import ComplexityScorer, ComplexityLevel
 from .tools import ToolRegistry, CommandLineTool, PythonCallableTool
 from .utils import load_config, Config
@@ -196,6 +196,60 @@ def cmd_list_tools(args):
     return 0
 
 
+def cmd_split(args):
+    """Handle split command - split PDF into simple and complex pages."""
+    setup_logging("DEBUG" if args.verbose else "INFO")
+
+    file_path = Path(args.file)
+    if not file_path.exists():
+        print(f"Error: File not found: {file_path}")
+        return 1
+
+    if file_path.suffix.lower() != ".pdf":
+        print("Error: Only PDF files can be split")
+        return 1
+
+    splitter = PDFSplitter(min_image_size=args.min_image_size)
+
+    # Just analyze without splitting
+    if args.analyze_only:
+        report = splitter.analyze_and_report(file_path)
+        print(report)
+        return 0
+
+    # Split the PDF
+    output_dir = Path(args.output) if args.output else None
+
+    print(f"Analyzing pages in: {file_path.name}")
+    result = splitter.split(file_path, output_dir=output_dir)
+
+    if args.format == "json":
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        print("\n" + "=" * 50)
+        print("PDF SPLIT RESULT")
+        print("=" * 50)
+        print(f"Original: {result.original_file}")
+        print(f"Total Pages: {result.total_pages}")
+        print()
+        print(f"Simple Pages (text only): {len(result.simple_pages)}")
+        if result.simple_pdf_path:
+            print(f"  Output: {result.simple_pdf_path}")
+        print()
+        print(f"Complex Pages (images/tables): {len(result.complex_pages)}")
+        if result.complex_pdf_path:
+            print(f"  Output: {result.complex_pdf_path}")
+
+        if result.complex_pages and len(result.complex_pages) <= 30:
+            print("\nComplex pages detail:")
+            for analysis in result.page_analyses:
+                if analysis.is_complex:
+                    reasons = ", ".join(analysis.reasons)
+                    print(f"  Page {analysis.page_number}: {reasons}")
+
+    return 0
+
+
 def collect_files(paths: List[str], recursive: bool = False) -> List[Path]:
     """Collect files from paths (handles directories)."""
     files = []
@@ -226,17 +280,17 @@ Examples:
   # Analyze a single document
   aidiff analyze document.pdf
 
-  # Analyze multiple documents and get JSON output
-  aidiff analyze *.pdf --format json
-
   # Check where a document would be routed
   aidiff route document.pdf
 
+  # Split PDF into simple and complex pages
+  aidiff split document.pdf --output ./split_output/
+
+  # Just analyze pages without splitting
+  aidiff split document.pdf --analyze-only
+
   # Process documents (requires tools configured)
   aidiff process --output ./xml_output/ documents/
-
-  # Process with a specific tool
-  aidiff process document.pdf --tool simple_converter
         """,
     )
 
@@ -332,6 +386,32 @@ Examples:
         help="List registered conversion tools",
     )
 
+    # Split command
+    split_parser = subparsers.add_parser(
+        "split",
+        help="Split PDF into simple and complex pages",
+    )
+    split_parser.add_argument(
+        "file",
+        help="PDF file to split",
+    )
+    split_parser.add_argument(
+        "--output", "-o",
+        help="Output directory for split PDFs",
+    )
+    split_parser.add_argument(
+        "--analyze-only", "-a",
+        action="store_true",
+        help="Only analyze pages, don't create split files",
+    )
+    split_parser.add_argument(
+        "--min-image-size",
+        type=int,
+        default=150,
+        dest="min_image_size",
+        help="Minimum image size in pixels (default: 150). Both width AND height must be >= this.",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -344,6 +424,7 @@ Examples:
         "route": cmd_route,
         "process": cmd_process,
         "list-tools": cmd_list_tools,
+        "split": cmd_split,
     }
 
     return commands[args.command](args)

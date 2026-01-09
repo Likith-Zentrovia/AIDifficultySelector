@@ -56,26 +56,39 @@ class ComplexityScorer:
     """
     Scores document complexity based on extracted features.
 
-    Uses weighted scoring across multiple dimensions to determine
-    overall complexity level.
+    SIMPLE documents (non-AI conversion):
+    - Text-heavy PDFs (even multi-column)
+    - Few images (0-3)
+    - Simple or no tables
+    - Standard fonts
+
+    COMPLEX documents (AI conversion needed):
+    - Many images (5+)
+    - Complex tables (nested, spanning cells)
+    - Many different fonts (5+)
+    - Scanned documents
+    - Interactive forms
     """
 
-    # Default weights (must sum to 100)
+    # Default weights - focused on what ACTUALLY makes conversion hard
     DEFAULT_WEIGHTS = {
-        "image_density": 25,
-        "table_presence": 20,
-        "layout_complexity": 20,
-        "text_density": 10,
-        "font_variety": 10,
-        "page_count": 5,
-        "has_forms": 10,
+        "image_count": 35,       # Many images = complex
+        "complex_tables": 25,    # Complex tables need AI
+        "font_variety": 15,      # Many fonts = complex formatting
+        "is_scanned": 15,        # Scanned = needs OCR/AI
+        "has_forms": 10,         # Forms are complex
     }
+
+    # Thresholds for what counts as "complex"
+    IMAGE_THRESHOLD = 5          # 5+ images per document = complex
+    FONT_THRESHOLD = 5           # 5+ different fonts = complex
+    TABLE_THRESHOLD = 3          # 3+ tables = complex
 
     def __init__(
         self,
         weights: Optional[Dict[str, float]] = None,
-        simple_threshold: float = 30.0,
-        complex_threshold: float = 70.0,
+        simple_threshold: float = 25.0,   # More lenient
+        complex_threshold: float = 60.0,  # Easier to be simple
     ):
         """
         Initialize complexity scorer.
@@ -102,59 +115,60 @@ class ComplexityScorer:
         """
         Calculate complexity score for a document.
 
-        Args:
-            features: Extracted document features
-
-        Returns:
-            ScoringResult with score and classification
+        Focus on what actually makes PDF-to-XML conversion difficult:
+        - Many images that need to be processed
+        - Complex tables that need structure recognition
+        - Scanned documents that need OCR
+        - Many fonts indicating complex formatting
         """
         component_scores = {}
         reasoning = []
 
-        # Image density
-        component_scores["image_density"] = features.image_density_score
-        if features.image_density_score > 50:
-            reasoning.append(
-                f"High image density ({features.image_count} images)"
-            )
+        # === IMAGE COUNT ===
+        # Only flag if there are MANY images (5+)
+        # 1-2 images in a text doc is fine
+        images_per_page = features.image_count / max(1, features.page_count)
+        if features.image_count >= self.IMAGE_THRESHOLD or images_per_page > 1:
+            component_scores["image_count"] = min(100, features.image_count * 10)
+            reasoning.append(f"Many images ({features.image_count} total, {images_per_page:.1f}/page)")
+        else:
+            component_scores["image_count"] = 0
+            if features.image_count > 0:
+                reasoning.append(f"Few images ({features.image_count}) - OK for simple conversion")
 
-        # Table presence
-        component_scores["table_presence"] = features.table_presence_score
-        if features.table_presence_score > 50:
-            reasoning.append(
-                f"Contains tables ({features.table_count} detected)"
-            )
+        # === COMPLEX TABLES ===
+        # Tables only matter if there are several or they're complex
+        if features.table_count >= self.TABLE_THRESHOLD:
+            component_scores["complex_tables"] = min(100, features.table_count * 20)
+            reasoning.append(f"Multiple tables ({features.table_count}) requiring structure recognition")
+        elif features.table_count > 0:
+            component_scores["complex_tables"] = features.table_count * 10
+        else:
+            component_scores["complex_tables"] = 0
 
-        # Layout complexity
-        component_scores["layout_complexity"] = features.layout_complexity_score
-        if features.layout_complexity_score > 50:
-            reasoning.append("Complex layout detected (multi-column or mixed content)")
+        # === FONT VARIETY ===
+        # Many different fonts indicate complex formatting
+        if features.font_count >= self.FONT_THRESHOLD:
+            component_scores["font_variety"] = min(100, features.font_count * 12)
+            reasoning.append(f"Many different fonts ({features.font_count}) - complex formatting")
+        else:
+            component_scores["font_variety"] = 0
 
-        # Text density (inverse scoring handled in analyzer)
-        component_scores["text_density"] = features.text_density_score
-        if features.text_density_score < 30:
-            reasoning.append("High text coverage (simpler structure)")
-
-        # Font variety
-        component_scores["font_variety"] = features.font_variety_score
-        if features.font_variety_score > 50:
-            reasoning.append(f"Multiple fonts used ({features.font_count})")
-
-        # Page count factor
-        page_score = self._score_page_count(features.page_count)
-        component_scores["page_count"] = page_score
-
-        # Forms
-        component_scores["has_forms"] = features.has_forms_score
-        if features.has_forms_score > 0:
-            reasoning.append("Contains interactive forms")
-
-        # Check for scanned document (big complexity factor)
+        # === SCANNED DOCUMENT ===
+        # Scanned docs ALWAYS need AI/OCR
         if features.is_scanned:
-            reasoning.append("Appears to be scanned document (requires OCR)")
-            # Boost all scores for scanned docs
-            for key in component_scores:
-                component_scores[key] = min(100, component_scores[key] + 30)
+            component_scores["is_scanned"] = 100
+            reasoning.append("Scanned document - requires OCR/AI processing")
+        else:
+            component_scores["is_scanned"] = 0
+
+        # === FORMS ===
+        # Interactive forms are complex
+        if features.has_forms_score > 0:
+            component_scores["has_forms"] = 100
+            reasoning.append("Contains interactive forms")
+        else:
+            component_scores["has_forms"] = 0
 
         # Calculate weighted total
         total_score = 0.0
@@ -166,16 +180,14 @@ class ComplexityScorer:
         # Determine level
         if total_score <= self.simple_threshold:
             level = ComplexityLevel.SIMPLE
-            if not reasoning:
-                reasoning.append("Simple text-based document with minimal formatting")
+            if not any("OK" not in r and "Few" not in r for r in reasoning):
+                reasoning = ["Simple text document - suitable for fast non-AI conversion"]
         elif total_score >= self.complex_threshold:
             level = ComplexityLevel.COMPLEX
         else:
             level = ComplexityLevel.MODERATE
-            if not reasoning:
-                reasoning.append("Moderate complexity with some formatting elements")
 
-        # Calculate confidence based on how clearly it falls into a category
+        # Calculate confidence
         confidence = self._calculate_confidence(total_score)
 
         return ScoringResult(
@@ -187,39 +199,12 @@ class ComplexityScorer:
             confidence=confidence,
         )
 
-    def _score_page_count(self, page_count: int) -> float:
-        """
-        Score based on page count.
-
-        Longer documents are slightly more complex due to potential
-        for varied layouts throughout.
-        """
-        if page_count <= 10:
-            return 10.0
-        elif page_count <= 50:
-            return 30.0
-        elif page_count <= 100:
-            return 50.0
-        elif page_count <= 500:
-            return 70.0
-        else:
-            return 90.0
-
     def _calculate_confidence(self, score: float) -> float:
-        """
-        Calculate confidence in classification.
-
-        Higher confidence when score is clearly in one category.
-        Lower confidence when score is near thresholds.
-        """
-        # Distance from nearest threshold
+        """Calculate confidence in classification."""
         dist_to_simple = abs(score - self.simple_threshold)
         dist_to_complex = abs(score - self.complex_threshold)
         min_distance = min(dist_to_simple, dist_to_complex)
 
-        # Confidence based on distance from thresholds
-        # If score is far from thresholds, high confidence
-        # If score is near thresholds, lower confidence
         if min_distance >= 20:
             return 0.95
         elif min_distance >= 10:
@@ -230,21 +215,13 @@ class ComplexityScorer:
             return 0.65
 
     def explain_score(self, result: ScoringResult) -> str:
-        """
-        Generate human-readable explanation of scoring.
-
-        Args:
-            result: ScoringResult to explain
-
-        Returns:
-            Formatted explanation string
-        """
+        """Generate human-readable explanation of scoring."""
         lines = [
             f"Complexity Level: {result.level.value.upper()}",
             f"Total Score: {result.total_score:.1f}/100",
             f"Confidence: {result.confidence:.0%}",
             "",
-            "Component Breakdown:",
+            "Scoring (only non-zero factors):",
         ]
 
         for component, score in sorted(
@@ -252,15 +229,16 @@ class ComplexityScorer:
             key=lambda x: x[1],
             reverse=True
         ):
-            weight = result.weights_used.get(component, 0)
-            contribution = (score * weight) / 100
-            lines.append(
-                f"  {component}: {score:.1f} "
-                f"(weight: {weight}%, contribution: {contribution:.1f})"
-            )
+            if score > 0:
+                weight = result.weights_used.get(component, 0)
+                contribution = (score * weight) / 100
+                lines.append(
+                    f"  {component}: {score:.0f} "
+                    f"(weight: {weight}%, adds: {contribution:.1f})"
+                )
 
         if result.reasoning:
-            lines.extend(["", "Key Factors:"])
+            lines.extend(["", "Analysis:"])
             for reason in result.reasoning:
                 lines.append(f"  • {reason}")
 
