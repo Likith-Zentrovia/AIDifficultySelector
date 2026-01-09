@@ -1,0 +1,53 @@
+# AI Difficulty Selector Configuration
+
+# Complexity scoring thresholds
+scoring:
+  # Documents with score below this are considered "simple"
+  simple_threshold: 30
+  # Documents with score above this are considered "complex"
+  complex_threshold: 70
+  # Documents between thresholds are "moderate"
+
+# Feature weights for complexity scoring (must sum to 100)
+weights:
+  image_density: 25        # How many images per page
+  table_presence: 20       # Tables detected in document
+  layout_complexity: 20    # Multi-column, mixed layouts
+  text_density: 10         # Amount of text vs whitespace
+  font_variety: 10         # Number of different fonts
+  page_count: 5            # Total pages (larger = slightly more complex)
+  has_forms: 10            # Interactive forms/fields
+
+# PDF Analysis settings
+pdf_analysis:
+  # Minimum image size (pixels) to count as significant
+  min_image_size: 100
+  # Sample pages for large documents (0 = analyze all)
+  sample_pages: 0
+  # Enable OCR-based text detection for scanned pages
+  detect_scanned_pages: true
+
+# EPUB Analysis settings
+epub_analysis:
+  # Check for embedded media
+  check_media: true
+  # Analyze CSS complexity
+  analyze_css: true
+
+# Tool routing configuration
+tools:
+  simple:
+    name: "simple_converter"
+    description: "Fast non-AI conversion for simple documents"
+    # Command template - {input} and {output} are placeholders
+    command: null  # Configure your tool command here
+
+  complex:
+    name: "ai_converter"
+    description: "AI-powered conversion for complex documents"
+    command: null  # Configure your tool command here
+
+# Logging
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

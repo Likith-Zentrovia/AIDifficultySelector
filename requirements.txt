@@ -1,0 +1,6 @@
+# Core dependencies
+PyMuPDF>=1.23.0        # PDF analysis (fitz)
+PyYAML>=6.0            # Configuration file parsing
+
+# Optional but recommended
+pillow>=10.0.0         # Image processing support
