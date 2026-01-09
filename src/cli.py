@@ -109,7 +109,10 @@ def cmd_analyze(args):
         result = agent.analyze_batch(files, max_workers=args.workers)
         print(agent.generate_report(result, format=args.format))
 
-    return 0 if result.success if isinstance(result, ProcessingResult) else result.failed == 0 else 1
+    if isinstance(result, ProcessingResult):
+        return 0 if result.success else 1
+    else:
+        return 0 if result.failed == 0 else 1
 
 
 def cmd_route(args):
