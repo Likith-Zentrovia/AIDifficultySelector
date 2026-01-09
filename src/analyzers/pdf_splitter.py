@@ -58,15 +58,15 @@ class PDFSplitter:
 
     def __init__(
         self,
-        min_image_size: int = 100,
-        images_threshold: int = 2,      # 2+ images = complex page
-        tables_threshold: int = 1,       # 1+ tables = complex page
+        min_image_size: int = 150,       # Larger threshold to ignore small graphics
+        images_threshold: int = 3,       # 3+ significant images = complex page
+        tables_threshold: int = 1,       # 1+ real tables = complex page
     ):
         """
         Initialize PDF splitter.
 
         Args:
-            min_image_size: Minimum image dimension to count
+            min_image_size: Minimum image dimension to count (ignores icons/bullets)
             images_threshold: Images per page to mark as complex
             tables_threshold: Tables per page to mark as complex
         """
@@ -124,9 +124,31 @@ class PDFSplitter:
         # Detect tables (heuristic)
         table_count = self._detect_tables(page)
 
-        # Check if scanned (image with little text)
+        # Check if scanned (large image covering most of page with very little text)
         text = page.get_text().strip()
-        is_scanned = len(images) > 0 and len(text) < 100
+        page_rect = page.rect
+        page_area = page_rect.width * page_rect.height
+
+        # Only mark as scanned if:
+        # 1. Has at least one large image (>50% of page area)
+        # 2. AND very little extractable text (<50 chars)
+        is_scanned = False
+        if len(text) < 50 and significant_images > 0:
+            # Check if any image is large (likely full-page scan)
+            for img in images:
+                try:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    if base_image:
+                        w = base_image.get("width", 0)
+                        h = base_image.get("height", 0)
+                        img_area = w * h
+                        # If image is large relative to page, likely scanned
+                        if img_area > page_area * 0.3:
+                            is_scanned = True
+                            break
+                except:
+                    pass
 
         # Check for forms
         has_forms = False
@@ -164,29 +186,60 @@ class PDFSplitter:
         )
 
     def _detect_tables(self, page) -> int:
-        """Detect tables on a page using drawing heuristics."""
+        """
+        Detect REAL tables on a page (not just multi-column text).
+
+        Only flags as table if there's clear evidence of grid structure:
+        - Many rectangles forming cells
+        - OR intersecting horizontal and vertical lines
+        """
         drawings = page.get_drawings()
 
-        # Count rectangles and lines
-        rect_count = sum(1 for d in drawings if d.get("type") == "re")
-        line_count = sum(1 for d in drawings if d.get("type") in ("l", "s"))
+        if not drawings:
+            return 0
 
-        # Heuristic: many rectangles or lines = likely table
-        if rect_count > 10 or line_count > 20:
+        # Separate horizontal and vertical lines
+        horizontal_lines = []
+        vertical_lines = []
+        rectangles = []
+
+        for d in drawings:
+            dtype = d.get("type")
+            if dtype == "re":
+                rectangles.append(d)
+            elif dtype in ("l", "s"):
+                # Check if it's a line with points
+                items = d.get("items", [])
+                for item in items:
+                    if item[0] == "l" and len(item) >= 3:
+                        p1, p2 = item[1], item[2]
+                        # Horizontal line (y values similar)
+                        if abs(p1.y - p2.y) < 5 and abs(p1.x - p2.x) > 50:
+                            horizontal_lines.append((p1, p2))
+                        # Vertical line (x values similar)
+                        elif abs(p1.x - p2.x) < 5 and abs(p1.y - p2.y) > 20:
+                            vertical_lines.append((p1, p2))
+
+        # Method 1: Many cell-like rectangles (clear table cells)
+        # Need at least 6 rectangles that look like table cells
+        if len(rectangles) >= 6:
+            # Check if rectangles are arranged in a grid pattern
+            rect_tops = [r.get("rect", (0,0,0,0))[1] for r in rectangles if r.get("rect")]
+            from collections import Counter
+            row_counts = Counter(round(y, 0) for y in rect_tops)
+            # If multiple rectangles share same y position = likely table row
+            rows_with_multiple = sum(1 for c in row_counts.values() if c >= 2)
+            if rows_with_multiple >= 2:
+                return 1
+
+        # Method 2: Grid pattern - need BOTH horizontal AND vertical lines
+        # This catches tables drawn with lines instead of rectangles
+        if len(horizontal_lines) >= 3 and len(vertical_lines) >= 2:
             return 1
 
-        # Check for grid patterns in text alignment
-        text_dict = page.get_text("dict", flags=0)
-        if "blocks" in text_dict:
-            text_blocks = [b for b in text_dict["blocks"] if b.get("type") == 0]
-            if len(text_blocks) > 5:
-                # Check column alignment
-                x_positions = [round(b["bbox"][0], -1) for b in text_blocks]
-                from collections import Counter
-                x_counts = Counter(x_positions)
-                aligned_cols = sum(1 for c in x_counts.values() if c >= 3)
-                if aligned_cols >= 3:
-                    return 1
+        # Method 3: Very high rectangle count (definite table structure)
+        if len(rectangles) >= 15:
+            return 1
 
         return 0
 
