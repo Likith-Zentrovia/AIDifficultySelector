@@ -6,7 +6,7 @@ from pathlib import Path
 
 # Read README
 readme_path = Path(__file__).parent / "README.md"
-long_description = readme_path.read_text() if readme_path.exists() else ""
+long_description = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
 
 setup(
     name="ai-difficulty-selector",
