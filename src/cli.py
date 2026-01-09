@@ -209,10 +209,7 @@ def cmd_split(args):
         print("Error: Only PDF files can be split")
         return 1
 
-    splitter = PDFSplitter(
-        images_threshold=args.images_threshold,
-        tables_threshold=args.tables_threshold,
-    )
+    splitter = PDFSplitter(min_image_size=args.min_image_size)
 
     # Just analyze without splitting
     if args.analyze_only:
@@ -235,15 +232,15 @@ def cmd_split(args):
         print(f"Original: {result.original_file}")
         print(f"Total Pages: {result.total_pages}")
         print()
-        print(f"Simple Pages: {len(result.simple_pages)}")
+        print(f"Simple Pages (text only): {len(result.simple_pages)}")
         if result.simple_pdf_path:
             print(f"  Output: {result.simple_pdf_path}")
         print()
-        print(f"Complex Pages: {len(result.complex_pages)}")
+        print(f"Complex Pages (images/tables): {len(result.complex_pages)}")
         if result.complex_pdf_path:
             print(f"  Output: {result.complex_pdf_path}")
 
-        if result.complex_pages and len(result.complex_pages) <= 20:
+        if result.complex_pages and len(result.complex_pages) <= 30:
             print("\nComplex pages detail:")
             for analysis in result.page_analyses:
                 if analysis.is_complex:
@@ -408,16 +405,11 @@ Examples:
         help="Only analyze pages, don't create split files",
     )
     split_parser.add_argument(
-        "--images-threshold",
+        "--min-image-size",
         type=int,
-        default=2,
-        help="Images per page to mark as complex (default: 2)",
-    )
-    split_parser.add_argument(
-        "--tables-threshold",
-        type=int,
-        default=1,
-        help="Tables per page to mark as complex (default: 1)",
+        default=200,
+        dest="min_image_size",
+        help="Minimum image size in pixels to count (default: 200). Smaller images are ignored.",
     )
 
     args = parser.parse_args()

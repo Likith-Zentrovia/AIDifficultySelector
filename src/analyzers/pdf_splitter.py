@@ -3,7 +3,7 @@
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +14,7 @@ class PageAnalysis:
     page_number: int
     is_complex: bool
     image_count: int = 0
-    table_count: int = 0
-    has_forms: bool = False
+    has_table: bool = False
     is_scanned: bool = False
     reasons: List[str] = field(default_factory=list)
 
@@ -52,38 +51,22 @@ class PDFSplitter:
     """
     Splits PDFs into simple and complex pages.
 
-    Simple pages: Text-only or minimal images
-    Complex pages: Many images, tables, scanned content
+    SIMPLE = Text only (any layout, multi-column OK)
+    COMPLEX = Has images OR has tables
     """
 
-    def __init__(
-        self,
-        min_image_size: int = 150,       # Larger threshold to ignore small graphics
-        images_threshold: int = 3,       # 3+ significant images = complex page
-        tables_threshold: int = 1,       # 1+ real tables = complex page
-    ):
+    def __init__(self, min_image_size: int = 200):
         """
         Initialize PDF splitter.
 
         Args:
-            min_image_size: Minimum image dimension to count (ignores icons/bullets)
-            images_threshold: Images per page to mark as complex
-            tables_threshold: Tables per page to mark as complex
+            min_image_size: Minimum image dimension (width AND height) to count.
+                           Images smaller than this are ignored (logos, icons, bullets).
         """
         self.min_image_size = min_image_size
-        self.images_threshold = images_threshold
-        self.tables_threshold = tables_threshold
 
     def analyze_pages(self, file_path: Path) -> List[PageAnalysis]:
-        """
-        Analyze each page in a PDF for complexity.
-
-        Args:
-            file_path: Path to PDF file
-
-        Returns:
-            List of PageAnalysis for each page
-        """
+        """Analyze each page in a PDF for complexity."""
         try:
             import fitz
         except ImportError:
@@ -103,12 +86,23 @@ class PDFSplitter:
         return analyses
 
     def _analyze_page(self, doc, page, page_num: int) -> PageAnalysis:
-        """Analyze a single page for complexity."""
+        """
+        Analyze a single page.
+
+        Complex if:
+        - Has ANY significant image (larger than min_image_size)
+        - Has a real table (grid of cells with borders)
+        - Is a scanned page (full-page image with no text)
+
+        Simple if:
+        - Text only, regardless of layout
+        """
         reasons = []
 
-        # Count significant images
+        # === CHECK FOR IMAGES ===
         images = page.get_images(full=True)
         significant_images = 0
+
         for img in images:
             try:
                 xref = img[0]
@@ -116,132 +110,100 @@ class PDFSplitter:
                 if base_image:
                     w = base_image.get("width", 0)
                     h = base_image.get("height", 0)
+                    # Only count if BOTH dimensions are large enough
+                    # This filters out thin lines, small icons, bullets
                     if w >= self.min_image_size and h >= self.min_image_size:
                         significant_images += 1
             except:
-                significant_images += 1
+                pass  # Don't count if we can't verify size
 
-        # Detect tables (heuristic)
-        table_count = self._detect_tables(page)
+        # === CHECK FOR TABLES ===
+        has_table = self._has_real_table(page)
 
-        # Check if scanned (large image covering most of page with very little text)
+        # === CHECK IF SCANNED ===
         text = page.get_text().strip()
-        page_rect = page.rect
-        page_area = page_rect.width * page_rect.height
-
-        # Only mark as scanned if:
-        # 1. Has at least one large image (>50% of page area)
-        # 2. AND very little extractable text (<50 chars)
         is_scanned = False
-        if len(text) < 50 and significant_images > 0:
-            # Check if any image is large (likely full-page scan)
-            for img in images:
-                try:
-                    xref = img[0]
-                    base_image = doc.extract_image(xref)
-                    if base_image:
-                        w = base_image.get("width", 0)
-                        h = base_image.get("height", 0)
-                        img_area = w * h
-                        # If image is large relative to page, likely scanned
-                        if img_area > page_area * 0.3:
-                            is_scanned = True
-                            break
-                except:
-                    pass
+        # Scanned = has images but almost no extractable text
+        if len(images) > 0 and len(text) < 50:
+            is_scanned = True
 
-        # Check for forms
-        has_forms = False
-        widgets = page.widgets()
-        if widgets:
-            has_forms = len(list(widgets)) > 0
-
-        # Determine if complex
+        # === DETERMINE COMPLEXITY ===
         is_complex = False
 
-        if significant_images >= self.images_threshold:
+        if significant_images > 0:
             is_complex = True
-            reasons.append(f"{significant_images} images")
+            reasons.append(f"{significant_images} image(s)")
 
-        if table_count >= self.tables_threshold:
+        if has_table:
             is_complex = True
-            reasons.append(f"{table_count} table(s)")
+            reasons.append("has table")
 
         if is_scanned:
             is_complex = True
             reasons.append("scanned page")
 
-        if has_forms:
-            is_complex = True
-            reasons.append("has form fields")
-
         return PageAnalysis(
-            page_number=page_num + 1,  # 1-indexed for user display
+            page_number=page_num + 1,
             is_complex=is_complex,
             image_count=significant_images,
-            table_count=table_count,
-            has_forms=has_forms,
+            has_table=has_table,
             is_scanned=is_scanned,
             reasons=reasons,
         )
 
-    def _detect_tables(self, page) -> int:
+    def _has_real_table(self, page) -> bool:
         """
-        Detect REAL tables on a page (not just multi-column text).
+        Detect if page has a REAL table (not just multi-column text).
 
-        Only flags as table if there's clear evidence of grid structure:
-        - Many rectangles forming cells
-        - OR intersecting horizontal and vertical lines
+        A real table has:
+        - Visible cell borders (rectangles or grid lines)
+        - NOT just aligned text columns
+
+        This is conservative - only flags clear tables with borders.
         """
+        try:
+            # Use PyMuPDF's built-in table finder if available (v1.23.0+)
+            tables = page.find_tables()
+            if tables and len(tables.tables) > 0:
+                # Verify it's a real table with multiple cells
+                for table in tables.tables:
+                    if table.row_count >= 2 and table.col_count >= 2:
+                        return True
+        except AttributeError:
+            # Fallback for older PyMuPDF versions
+            pass
+        except Exception:
+            pass
+
+        # Fallback: Check for grid-like drawing patterns
         drawings = page.get_drawings()
-
         if not drawings:
-            return 0
+            return False
 
-        # Separate horizontal and vertical lines
-        horizontal_lines = []
-        vertical_lines = []
-        rectangles = []
+        # Count horizontal and vertical lines
+        h_lines = 0
+        v_lines = 0
 
         for d in drawings:
-            dtype = d.get("type")
-            if dtype == "re":
-                rectangles.append(d)
-            elif dtype in ("l", "s"):
-                # Check if it's a line with points
-                items = d.get("items", [])
-                for item in items:
-                    if item[0] == "l" and len(item) >= 3:
-                        p1, p2 = item[1], item[2]
-                        # Horizontal line (y values similar)
-                        if abs(p1.y - p2.y) < 5 and abs(p1.x - p2.x) > 50:
-                            horizontal_lines.append((p1, p2))
-                        # Vertical line (x values similar)
-                        elif abs(p1.x - p2.x) < 5 and abs(p1.y - p2.y) > 20:
-                            vertical_lines.append((p1, p2))
+            items = d.get("items", [])
+            for item in items:
+                if item[0] == "l" and len(item) >= 3:
+                    p1, p2 = item[1], item[2]
+                    dx = abs(p1.x - p2.x)
+                    dy = abs(p1.y - p2.y)
+                    # Horizontal line
+                    if dy < 3 and dx > 100:
+                        h_lines += 1
+                    # Vertical line
+                    elif dx < 3 and dy > 30:
+                        v_lines += 1
 
-        # Method 1: Many cell-like rectangles (clear table cells)
-        # Need at least 6 rectangles that look like table cells
-        if len(rectangles) >= 6:
-            # Check if rectangles are arranged in a grid pattern
-            rect_tops = [r.get("rect", (0,0,0,0))[1] for r in rectangles if r.get("rect")]
-            from collections import Counter
-            row_counts = Counter(round(y, 0) for y in rect_tops)
-            # If multiple rectangles share same y position = likely table row
-            rows_with_multiple = sum(1 for c in row_counts.values() if c >= 2)
-            if rows_with_multiple >= 2:
-                return 1
+        # Need BOTH horizontal AND vertical lines to form a grid
+        # This prevents flagging simple underlines or borders
+        if h_lines >= 4 and v_lines >= 3:
+            return True
 
-        # Method 2: Grid pattern - need BOTH horizontal AND vertical lines
-        # This catches tables drawn with lines instead of rectangles
-        if len(horizontal_lines) >= 3 and len(vertical_lines) >= 2:
-            return 1
-
-        # Method 3: Very high rectangle count (definite table structure)
-        if len(rectangles) >= 15:
-            return 1
-
-        return 0
+        return False
 
     def split(
         self,
@@ -250,18 +212,7 @@ class PDFSplitter:
         simple_suffix: str = "_simple",
         complex_suffix: str = "_complex",
     ) -> SplitResult:
-        """
-        Split a PDF into simple and complex pages.
-
-        Args:
-            file_path: Path to input PDF
-            output_dir: Directory for output files (default: same as input)
-            simple_suffix: Suffix for simple pages PDF
-            complex_suffix: Suffix for complex pages PDF
-
-        Returns:
-            SplitResult with paths to output files
-        """
+        """Split a PDF into simple and complex pages."""
         try:
             import fitz
         except ImportError:
@@ -291,7 +242,6 @@ class PDFSplitter:
         doc = fitz.open(file_path)
         base_name = file_path.stem
 
-        # Simple pages PDF
         if simple_pages:
             simple_doc = fitz.open()
             for page_num in simple_pages:
@@ -300,9 +250,8 @@ class PDFSplitter:
             simple_doc.save(simple_path)
             simple_doc.close()
             result.simple_pdf_path = str(simple_path)
-            logger.info(f"Created simple PDF: {simple_path} ({len(simple_pages)} pages)")
+            logger.info(f"Created: {simple_path} ({len(simple_pages)} pages)")
 
-        # Complex pages PDF
         if complex_pages:
             complex_doc = fitz.open()
             for page_num in complex_pages:
@@ -311,47 +260,40 @@ class PDFSplitter:
             complex_doc.save(complex_path)
             complex_doc.close()
             result.complex_pdf_path = str(complex_path)
-            logger.info(f"Created complex PDF: {complex_path} ({len(complex_pages)} pages)")
+            logger.info(f"Created: {complex_path} ({len(complex_pages)} pages)")
 
         doc.close()
         return result
 
     def analyze_and_report(self, file_path: Path) -> str:
-        """
-        Analyze pages and return a human-readable report.
-
-        Args:
-            file_path: Path to PDF
-
-        Returns:
-            Formatted report string
-        """
+        """Analyze pages and return a human-readable report."""
         analyses = self.analyze_pages(file_path)
 
         simple = [a for a in analyses if not a.is_complex]
-        complex = [a for a in analyses if a.is_complex]
+        complex_list = [a for a in analyses if a.is_complex]
 
         lines = [
-            f"PDF Page Analysis: {file_path.name}",
+            f"PDF Page Analysis: {Path(file_path).name}",
             "=" * 50,
             f"Total Pages: {len(analyses)}",
-            f"Simple Pages: {len(simple)} ({len(simple)/len(analyses)*100:.0f}%)",
-            f"Complex Pages: {len(complex)} ({len(complex)/len(analyses)*100:.0f}%)",
+            f"Simple Pages (text only): {len(simple)}",
+            f"Complex Pages (images/tables): {len(complex_list)}",
             "",
         ]
 
-        if complex:
-            lines.append("Complex Pages Detail:")
+        if complex_list:
+            lines.append("Complex Pages:")
             lines.append("-" * 30)
-            for a in complex:
+            for a in complex_list:
                 reasons = ", ".join(a.reasons) if a.reasons else "unknown"
                 lines.append(f"  Page {a.page_number}: {reasons}")
 
-        if simple and len(simple) <= 20:
+        if simple:
             lines.append("")
-            lines.append(f"Simple Pages: {', '.join(map(str, [a.page_number for a in simple]))}")
-        elif simple:
-            lines.append("")
-            lines.append(f"Simple Pages: {simple[0].page_number}-{simple[-1].page_number} (and others)")
+            if len(simple) <= 30:
+                page_nums = ", ".join(str(a.page_number) for a in simple)
+                lines.append(f"Simple Pages: {page_nums}")
+            else:
+                lines.append(f"Simple Pages: {len(simple)} pages (text only)")
 
         return "\n".join(lines)
