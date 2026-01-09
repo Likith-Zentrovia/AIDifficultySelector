@@ -18,22 +18,18 @@ class ScoringConfig:
 @dataclass
 class WeightsConfig:
     """Feature weights configuration."""
-    image_density: int = 25
-    table_presence: int = 20
-    layout_complexity: int = 20
-    text_density: int = 10
-    font_variety: int = 10
-    page_count: int = 5
+    image_count: int = 35
+    complex_tables: int = 25
+    font_variety: int = 15
+    is_scanned: int = 15
     has_forms: int = 10
 
     def to_dict(self) -> Dict[str, int]:
         return {
-            "image_density": self.image_density,
-            "table_presence": self.table_presence,
-            "layout_complexity": self.layout_complexity,
-            "text_density": self.text_density,
+            "image_count": self.image_count,
+            "complex_tables": self.complex_tables,
             "font_variety": self.font_variety,
-            "page_count": self.page_count,
+            "is_scanned": self.is_scanned,
             "has_forms": self.has_forms,
         }
 
