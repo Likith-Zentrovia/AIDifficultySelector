@@ -3,24 +3,32 @@
 # Complexity scoring thresholds
 scoring:
   # Documents with score below this are considered "simple"
-  simple_threshold: 30
+  # Most text-based PDFs should fall here (even multi-column)
+  simple_threshold: 25
   # Documents with score above this are considered "complex"
-  complex_threshold: 70
-  # Documents between thresholds are "moderate"
+  # Only PDFs with many images, tables, or scanned content
+  complex_threshold: 60
 
 # Feature weights for complexity scoring (must sum to 100)
+# Focused on what ACTUALLY makes PDF-to-XML conversion difficult
 weights:
-  image_density: 25        # How many images per page
-  table_presence: 20       # Tables detected in document
-  layout_complexity: 20    # Multi-column, mixed layouts
-  text_density: 10         # Amount of text vs whitespace
-  font_variety: 10         # Number of different fonts
-  page_count: 5            # Total pages (larger = slightly more complex)
-  has_forms: 10            # Interactive forms/fields
+  image_count: 35        # Many images (5+) = needs AI
+  complex_tables: 25     # Multiple complex tables = needs AI
+  font_variety: 15       # Many fonts (5+) = complex formatting
+  is_scanned: 15         # Scanned docs ALWAYS need OCR/AI
+  has_forms: 10          # Interactive forms are complex
+
+# Thresholds for flagging complexity
+complexity_thresholds:
+  # Only flag as complex if MORE than these counts
+  min_images_for_complex: 5      # 5+ images = complex
+  min_tables_for_complex: 3      # 3+ tables = complex
+  min_fonts_for_complex: 5       # 5+ fonts = complex
 
 # PDF Analysis settings
 pdf_analysis:
   # Minimum image size (pixels) to count as significant
+  # Small icons/bullets are ignored
   min_image_size: 100
   # Sample pages for large documents (0 = analyze all)
   sample_pages: 0
