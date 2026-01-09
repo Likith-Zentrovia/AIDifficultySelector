@@ -3,7 +3,7 @@
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +55,13 @@ class PDFSplitter:
     COMPLEX = Has images OR has tables
     """
 
-    def __init__(self, min_image_size: int = 200):
+    def __init__(self, min_image_size: int = 100):
         """
         Initialize PDF splitter.
 
         Args:
-            min_image_size: Minimum image dimension (width AND height) to count.
-                           Images smaller than this are ignored (logos, icons, bullets).
+            min_image_size: Minimum image dimension to count as significant.
+                           Default 100px filters tiny icons/bullets.
         """
         self.min_image_size = min_image_size
 
@@ -87,121 +87,175 @@ class PDFSplitter:
 
     def _analyze_page(self, doc, page, page_num: int) -> PageAnalysis:
         """
-        Analyze a single page.
+        Analyze a single page for complexity.
 
-        Complex if:
-        - Has ANY significant image (larger than min_image_size)
-        - Has a real table (grid of cells with borders)
-        - Is a scanned page (full-page image with no text)
+        COMPLEX if:
+        - Has ANY significant image
+        - Has a table (detected via find_tables or grid lines)
+        - Is scanned (image with no text)
 
-        Simple if:
-        - Text only, regardless of layout
+        SIMPLE if:
+        - Text only (any layout/columns)
         """
         reasons = []
 
-        # === CHECK FOR IMAGES ===
-        images = page.get_images(full=True)
-        significant_images = 0
+        # === METHOD 1: Check for images using get_images ===
+        image_count = self._count_images_method1(doc, page)
 
-        for img in images:
-            try:
-                xref = img[0]
-                base_image = doc.extract_image(xref)
-                if base_image:
-                    w = base_image.get("width", 0)
-                    h = base_image.get("height", 0)
-                    # Only count if BOTH dimensions are large enough
-                    # This filters out thin lines, small icons, bullets
-                    if w >= self.min_image_size and h >= self.min_image_size:
-                        significant_images += 1
-            except:
-                pass  # Don't count if we can't verify size
+        # === METHOD 2: Check for images using image blocks in page dict ===
+        if image_count == 0:
+            image_count = self._count_images_method2(page)
+
+        # === METHOD 3: Check for XObjects (embedded images) ===
+        if image_count == 0:
+            image_count = self._count_images_method3(page)
 
         # === CHECK FOR TABLES ===
-        has_table = self._has_real_table(page)
+        has_table = self._detect_table(page)
 
         # === CHECK IF SCANNED ===
         text = page.get_text().strip()
-        is_scanned = False
-        # Scanned = has images but almost no extractable text
-        if len(images) > 0 and len(text) < 50:
-            is_scanned = True
+        all_images = page.get_images(full=True)
+        is_scanned = len(all_images) > 0 and len(text) < 50
 
         # === DETERMINE COMPLEXITY ===
         is_complex = False
 
-        if significant_images > 0:
+        if image_count > 0:
             is_complex = True
-            reasons.append(f"{significant_images} image(s)")
+            reasons.append(f"{image_count} image(s)")
 
         if has_table:
             is_complex = True
-            reasons.append("has table")
+            reasons.append("table detected")
 
-        if is_scanned:
+        if is_scanned and not is_complex:
             is_complex = True
             reasons.append("scanned page")
 
         return PageAnalysis(
             page_number=page_num + 1,
             is_complex=is_complex,
-            image_count=significant_images,
+            image_count=image_count,
             has_table=has_table,
             is_scanned=is_scanned,
             reasons=reasons,
         )
 
-    def _has_real_table(self, page) -> bool:
-        """
-        Detect if page has a REAL table (not just multi-column text).
+    def _count_images_method1(self, doc, page) -> int:
+        """Count images using get_images() - most reliable method."""
+        images = page.get_images(full=True)
+        count = 0
 
-        A real table has:
-        - Visible cell borders (rectangles or grid lines)
-        - NOT just aligned text columns
+        for img in images:
+            try:
+                xref = img[0]
+                # Try to get image info
+                base_image = doc.extract_image(xref)
+                if base_image:
+                    w = base_image.get("width", 0)
+                    h = base_image.get("height", 0)
+                    # Count if either dimension is significant
+                    if w >= self.min_image_size or h >= self.min_image_size:
+                        count += 1
+                else:
+                    # Can't extract but image exists - count it
+                    count += 1
+            except Exception:
+                # If extraction fails, still count the image
+                count += 1
 
-        This is conservative - only flags clear tables with borders.
-        """
+        return count
+
+    def _count_images_method2(self, page) -> int:
+        """Count images using page text dict - catches some missed images."""
         try:
-            # Use PyMuPDF's built-in table finder if available (v1.23.0+)
+            page_dict = page.get_text("dict", flags=0)
+            count = 0
+
+            for block in page_dict.get("blocks", []):
+                # Type 1 = image block
+                if block.get("type") == 1:
+                    # Check size from bbox
+                    bbox = block.get("bbox", (0, 0, 0, 0))
+                    width = bbox[2] - bbox[0]
+                    height = bbox[3] - bbox[1]
+                    if width >= self.min_image_size or height >= self.min_image_size:
+                        count += 1
+
+            return count
+        except Exception:
+            return 0
+
+    def _count_images_method3(self, page) -> int:
+        """Count XObject images on the page."""
+        try:
+            xobjects = page.get_xobjects()
+            count = 0
+
+            for xobj in xobjects:
+                # xobj is (xref, name, invoker, bbox)
+                if len(xobj) >= 4:
+                    bbox = xobj[3]
+                    if bbox:
+                        width = abs(bbox[2] - bbox[0])
+                        height = abs(bbox[3] - bbox[1])
+                        if width >= self.min_image_size or height >= self.min_image_size:
+                            count += 1
+
+            return count
+        except Exception:
+            return 0
+
+    def _detect_table(self, page) -> bool:
+        """
+        Detect if page has a real table.
+
+        Uses multiple methods:
+        1. PyMuPDF's find_tables() (best, requires v1.23.0+)
+        2. Grid line detection (fallback)
+        """
+        # Method 1: Use PyMuPDF's table finder
+        try:
             tables = page.find_tables()
             if tables and len(tables.tables) > 0:
-                # Verify it's a real table with multiple cells
                 for table in tables.tables:
+                    # Real table has at least 2 rows and 2 columns
                     if table.row_count >= 2 and table.col_count >= 2:
                         return True
-        except AttributeError:
-            # Fallback for older PyMuPDF versions
+        except (AttributeError, Exception):
             pass
+
+        # Method 2: Detect grid pattern from drawings
+        try:
+            drawings = page.get_drawings()
+            if not drawings:
+                return False
+
+            h_lines = 0
+            v_lines = 0
+
+            for d in drawings:
+                items = d.get("items", [])
+                for item in items:
+                    if len(item) >= 3 and item[0] == "l":
+                        p1, p2 = item[1], item[2]
+                        dx = abs(p1.x - p2.x)
+                        dy = abs(p1.y - p2.y)
+
+                        # Horizontal line (long, flat)
+                        if dy < 5 and dx > 80:
+                            h_lines += 1
+                        # Vertical line (tall, thin)
+                        elif dx < 5 and dy > 25:
+                            v_lines += 1
+
+            # Need both horizontal AND vertical lines for a table grid
+            if h_lines >= 3 and v_lines >= 2:
+                return True
+
         except Exception:
             pass
-
-        # Fallback: Check for grid-like drawing patterns
-        drawings = page.get_drawings()
-        if not drawings:
-            return False
-
-        # Count horizontal and vertical lines
-        h_lines = 0
-        v_lines = 0
-
-        for d in drawings:
-            items = d.get("items", [])
-            for item in items:
-                if item[0] == "l" and len(item) >= 3:
-                    p1, p2 = item[1], item[2]
-                    dx = abs(p1.x - p2.x)
-                    dy = abs(p1.y - p2.y)
-                    # Horizontal line
-                    if dy < 3 and dx > 100:
-                        h_lines += 1
-                    # Vertical line
-                    elif dx < 3 and dy > 30:
-                        v_lines += 1
-
-        # Need BOTH horizontal AND vertical lines to form a grid
-        # This prevents flagging simple underlines or borders
-        if h_lines >= 4 and v_lines >= 3:
-            return True
 
         return False
 
@@ -274,7 +328,7 @@ class PDFSplitter:
 
         lines = [
             f"PDF Page Analysis: {Path(file_path).name}",
-            "=" * 50,
+            "=" * 60,
             f"Total Pages: {len(analyses)}",
             f"Simple Pages (text only): {len(simple)}",
             f"Complex Pages (images/tables): {len(complex_list)}",
@@ -282,18 +336,21 @@ class PDFSplitter:
         ]
 
         if complex_list:
-            lines.append("Complex Pages:")
-            lines.append("-" * 30)
+            lines.append("COMPLEX PAGES:")
+            lines.append("-" * 40)
             for a in complex_list:
                 reasons = ", ".join(a.reasons) if a.reasons else "unknown"
                 lines.append(f"  Page {a.page_number}: {reasons}")
 
+        lines.append("")
+
         if simple:
-            lines.append("")
-            if len(simple) <= 30:
+            lines.append("SIMPLE PAGES:")
+            lines.append("-" * 40)
+            if len(simple) <= 50:
                 page_nums = ", ".join(str(a.page_number) for a in simple)
-                lines.append(f"Simple Pages: {page_nums}")
+                lines.append(f"  Pages: {page_nums}")
             else:
-                lines.append(f"Simple Pages: {len(simple)} pages (text only)")
+                lines.append(f"  {len(simple)} pages (text only)")
 
         return "\n".join(lines)

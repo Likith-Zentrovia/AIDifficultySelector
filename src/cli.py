@@ -407,9 +407,9 @@ Examples:
     split_parser.add_argument(
         "--min-image-size",
         type=int,
-        default=200,
+        default=100,
         dest="min_image_size",
-        help="Minimum image size in pixels to count (default: 200). Smaller images are ignored.",
+        help="Minimum image size in pixels to count (default: 100). Smaller images are ignored.",
     )
 
     args = parser.parse_args()
